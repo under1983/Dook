@@ -8,42 +8,29 @@ using Dook.Attributes;
 
 namespace Dook
 {
-    public class Query<T> : IMappedQueryable<T>
+    public class QueryString<T> : IMappedStringQueryable<T>
     {
         protected QueryProvider QueryProvider;
         private Expression Predicate;
+        public SQLPredicate SQLPredicate { get; set; } = new SQLPredicate();
         string alias = "x";
 
-        public Query(QueryProvider provider)
+        public QueryString(QueryProvider provider)
         {
+            SqlQueryAttribute sqlQueryAttribute = typeof(T).GetTypeInfo().GetCustomAttribute<SqlQueryAttribute>();
+            if (sqlQueryAttribute == null)
+            {
+                throw new Exception($"Generic type {nameof(T)} must define {nameof(SqlQueryAttribute)} to be used with {nameof(QueryString<T>)} class.");
+            }
             if (provider == null)
             {
-                throw new ArgumentNullException("provider");
-            }
-            this.QueryProvider = provider;
-            this.Predicate = Expression.Constant(this);
-            GetTableData();
-        }
-
-        public Query(QueryProvider provider, Expression expression)
-        {
-            if (provider == null)
-            {
-                throw new ArgumentNullException("provider");
+                throw new ArgumentNullException(nameof(provider));
             }
 
-            if (expression == null)
-            {
-                throw new ArgumentNullException("expression");
-            }
-
-            if (!typeof(IQueryable<T>).IsAssignableFrom(expression.Type))
-            {
-                throw new ArgumentOutOfRangeException("expression");
-            }
-            this.QueryProvider = provider;
-            this.Predicate = expression;
-            GetTableData();
+            QueryProvider = provider;
+            SQLPredicate.Sql = sqlQueryAttribute.Query;
+            Predicate = Expression.Constant(this);
+            if (typeof(T).GetInterfaces().Contains(typeof(IEntity))) GetTableData();
         }
 
         private void GetTableData()
@@ -95,7 +82,7 @@ namespace Dook
 
         public override string ToString()
         {
-            return this.QueryProvider.GetQueryText(this.Predicate);
+            return this.SQLPredicate.Sql;
         }
     }
 }
