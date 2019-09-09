@@ -30,10 +30,10 @@ namespace Dook
         /// <returns>The sql query.</returns>
         /// <param name="expression">The LINQ Expression to be translated.</param>
         /// <typeparam name="T">The 1st type parameter.</typeparam>
-        private SQLPredicate Translate(Expression expression)
+        private SQLPredicate Translate(Expression expression, bool ignoreAliases = false)
         {   
             ISQLTranslator sql = SQLTranslatorFactory.GetTranslator(DbType);
-            SQLPredicate pred = sql.Translate(Evaluator.PartialEval(expression));
+            SQLPredicate pred = sql.Translate(Evaluator.PartialEval(expression), 0, ignoreAliases);
             return pred;
         }
 
@@ -53,18 +53,15 @@ namespace Dook
             return DbProvider.GetCommand();
         }
 
-        public IDbCommand GetUpdateCommand<T>(T entity, string TableName, Dictionary<string, string> TableMapping) where T : IEntity, new()
+        public IDbCommand GetUpdateCommand<T>(T entity, string TableName, Dictionary<string, ColumnInfo> TableMapping) where T : IEntity, new()
         {
+            if (entity.Id == 0) throw new Exception("Id property must be a positive integer.");
             StringBuilder query = new StringBuilder();
             if (entity is ITrackDateOfChange)
             {
                 ((ITrackDateOfChange)entity).UpdatedOn = DateTime.Now;
             }
-            if (entity is ITrackDateOfCreation)
-            {
-                ((ITrackDateOfCreation)entity).CreatedOn = ((ITrackDateOfCreation)entity).CreatedOn == DateTime.MinValue ? DateTime.Now : ((ITrackDateOfCreation)entity).CreatedOn;
-            }
-            query.Append(" UPDATE ");
+            query.Append("UPDATE ");
             query.Append(TableName);
             query.Append(" SET ");
             //Building update string                   
@@ -72,7 +69,7 @@ namespace Dook
             string us = string.Empty;
             foreach (string p in TableMapping.Keys)
             {
-                if (p != "Id")
+                if (p != "Id" && p != "CreatedOn")
                 {
                     if (starting)
                     {
@@ -80,20 +77,20 @@ namespace Dook
                     }
                     else
                     {
-                        us += ",";
+                        us += ", ";
                     }
-                    us += TableMapping[p] + "= @" + p;
+                    us += TableMapping[p].ColumnName + " = @" + p;
                 }
             }
             query.Append(us);
-            query.Append(" WHERE " + TableMapping["Id"] + " = @id");
+            query.Append(" WHERE " + TableMapping["Id"].ColumnName + " = @id;");
             IDbCommand cmd = DbProvider.GetCommand();
             cmd.CommandText = query.ToString();
             //MySqlCommand cmd = new MySqlCommand(query.ToString());
             Type Type = typeof(T);
             foreach (string p in TableMapping.Keys)
             {
-                if (p != "Id")
+                if (p != "Id" && p != "CreatedOn")
                 {
                     SetParameter(cmd, "@" + p, Type.GetProperty(p).GetValue(entity) ?? DBNull.Value);
                 }
@@ -102,7 +99,7 @@ namespace Dook
             return cmd;
         }
 
-        public IDbCommand GetInsertCommand<T>(T entity, string TableName, Dictionary<string, string> TableMapping) where T : IEntity, new()
+        public IDbCommand GetInsertCommand<T>(T entity, string TableName, Dictionary<string, ColumnInfo> TableMapping) where T : IEntity, new()
         {
             StringBuilder query = new StringBuilder();
             if (entity is ITrackDateOfCreation)
@@ -113,7 +110,7 @@ namespace Dook
             {
                 ((ITrackDateOfChange)entity).UpdatedOn = DateTime.Now;
             }
-            query.Append(" INSERT INTO ");
+            query.Append("INSERT INTO ");
             query.Append(TableName);
             //Building field and values string
             string fields = string.Empty;
@@ -129,15 +126,15 @@ namespace Dook
                     if (starting)
                     {
                         fields += " (";
-                        values += " (";
+                        values += "(";
                         starting = false;
                     }
                     else
                     {
-                        fields += ",";
-                        values += ",";
+                        fields += ", ";
+                        values += ", ";
                     }
-                    fields += TableMapping[p];
+                    fields += TableMapping[p].ColumnName;
                     values += "@" + p;
                 }
             }
@@ -146,7 +143,7 @@ namespace Dook
             query.Append(fields);
             query.Append(" VALUES ");
             query.Append(values);
-            query.Append(" ; SELECT @@IDENTITY;");
+            query.Append("; SELECT @@IDENTITY;");
             IDbCommand cmd = DbProvider.GetCommand();
             cmd.CommandText = query.ToString();
             foreach (string p in TableMapping.Keys)
@@ -159,25 +156,33 @@ namespace Dook
             return cmd;
         }
 
-        public IDbCommand GetDeleteCommand(int id, string TableName, Dictionary<string, string> TableMapping)
+        public IDbCommand GetDeleteCommand(int id, string TableName, Dictionary<string, ColumnInfo> TableMapping)
         {
-            StringBuilder query = new StringBuilder();
-            query.Append(" DELETE FROM ");
-            query.Append(TableName);
-            query.Append(" WHERE " + TableMapping["Id"] + "= @id");
+            string queryText = $"DELETE FROM {TableName} WHERE {TableMapping["Id"].ColumnName} = @id;";
             IDbCommand cmd = DbProvider.GetCommand();
-            cmd.CommandText = query.ToString();
+            cmd.CommandText = queryText;
             SetParameter(cmd, "@id", id);
             return cmd;
         }
 
-        public IDbCommand GetDeleteAllCommand(string TableName, Dictionary<string, string> TableMapping)
+        public IDbCommand GetDeleteWhereCommand<T>(Expression<Func<T,bool>> expression, string TableName)
         {
+            if (expression == null) throw new ArgumentNullException(nameof(expression), "The provided expression cannot be null.");
+            SQLPredicate predicate = Translate(Evaluator.PartialEval(expression), true);
+            LambdaExpression lambda = (LambdaExpression) expression;//for getting alias
             StringBuilder query = new StringBuilder();
-            query.Append(" DELETE FROM ");
-            query.Append(TableName);
+            query.Append($"DELETE FROM {TableName} WHERE {predicate.Sql};");
             IDbCommand cmd = DbProvider.GetCommand();
             cmd.CommandText = query.ToString();
+            predicate.SetParameters(cmd);
+            return cmd;
+        }
+
+        public IDbCommand GetDeleteAllCommand(string TableName)
+        {
+            string queryText = $"DELETE FROM {TableName};";
+            IDbCommand cmd = DbProvider.GetCommand();
+            cmd.CommandText = queryText;
             return cmd;
         }
 
@@ -220,27 +225,41 @@ namespace Dook
             {
                 IDataReader reader = cmd.ExecuteReader();
                 Type elementType = TypeSystem.GetElementType(expression.Type);
-                //This is to handle Count method
-                if (elementType == typeof(int))
+                //TODO: for select to work properly, we need to identify whether the elementType is an IEnumerable or not
+                if (!typeof(IQueryable).IsAssignableFrom(expression.Type))
                 {
-                    reader.Read();
-                    int result = Convert.ToInt32(reader[0] == DBNull.Value ? 0 : reader[0]);
-                    reader.Dispose();
-                    return result;
+                    //This is to handle Count method
+                    if (elementType == typeof(int))
+                    {
+                        reader.Read();
+                        int result = Convert.ToInt32(reader[0] == DBNull.Value ? 0 : reader[0]);
+                        reader.Dispose();
+                        return result;
+                    }
+                    //Sum method
+                    if (elementType == typeof(double))
+                    {
+                        reader.Read();
+                        double result = Convert.ToDouble(reader[0] == DBNull.Value ? 0 : reader[0]);
+                        reader.Dispose();
+                        return result;
+                    }
+                    //Any method
+                    if (elementType == typeof(bool))
+                    {
+                        reader.Read();
+                        bool result = Convert.ToBoolean(reader[0]);
+                        reader.Dispose();
+                        return result;
+                    }
                 }
-                if (elementType == typeof(double))
+                if (elementType.IsPrimitive || elementType == typeof(string))
                 {
-                    reader.Read();
-                    double result = Convert.ToDouble(reader[0] == DBNull.Value ? 0 : reader[0]);
-                    reader.Dispose();
-                    return result;
-                }
-                if (elementType == typeof(bool))
-                {
-                    reader.Read();
-                    bool result = Convert.ToBoolean(reader[0]);
-                    reader.Dispose();
-                    return result;
+                    return Activator.CreateInstance(
+                    typeof(VariableReader<>).MakeGenericType(elementType),
+                    BindingFlags.Instance | BindingFlags.NonPublic, null,
+                    new object[] { reader },
+                    null);
                 }
                 return Activator.CreateInstance(
                 typeof(ObjectReader<>).MakeGenericType(elementType),

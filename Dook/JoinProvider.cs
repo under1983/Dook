@@ -20,7 +20,7 @@ namespace Dook
         public Dictionary<string, int> IndexDictionary = new Dictionary<string, int>(); //To know the index where query results start for a particular Repo/Entity
         public List<string> Parameters = new List<string>();
         public Dictionary<string, Type> RepositoryDictionary = new Dictionary<string, Type>(); //To know which repository is storing query results for which alias.
-        public Dictionary<string, Dictionary<string,string>> TableMappingDictionary = new Dictionary<string, Dictionary<string, string>>(); //To know which repository is storing query results for which alias.
+        public Dictionary<string, Dictionary<string,ColumnInfo>> TableMappingDictionary = new Dictionary<string, Dictionary<string, ColumnInfo>>(); //To know which repository is storing query results for which alias.
         Dictionary<string, int> AddingOrder = new Dictionary<string, int>();
         Dictionary<string, JoinType> JoinTypeDictionary = new Dictionary<string, JoinType>();
         List<SQLPredicate> JoinFilters = new List<SQLPredicate>();
@@ -97,30 +97,6 @@ namespace Dook
             JoinFilters.Add(predicate);
         }
 
-        public void AddPagination(int skip, int take)
-        {
-            SQLPredicate predicate = new SQLPredicate();
-            switch(DbProvider.DbType)
-            {
-                case DbType.MySql:
-                    Where += " LIMIT " + take + " OFFSET " + skip;
-                    break;
-                case DbType.Sql:
-                    Where += "OFFSET" + skip + " ROWS FETCH NEXT " + take + " ROWS ONLY";
-                    break;
-                default:
-                    throw new Exception("Unsuported Database Provider.");
-            }
-            JoinFilters.Add(predicate);
-        }
-
-        public void AddOrderBy<T>(Expression<Func<T,object>> expression)
-        {
-            SQLPredicate predicate = QueryTranslator.Translate(Evaluator.PartialEval(expression), i);
-            Where += " ORDER BY " + predicate.Sql;
-            //JoinFilters.Add(predicate);
-        }
-
         void AddParameter<T>(string name, IEntity entity, Type repoType, Type type, EntitySet<T> entitySet, JoinType joinType = JoinType.Inner) where T : class, IEntity, new()
         {
             if (!Parameters.Contains(name)) {               
@@ -149,22 +125,6 @@ namespace Dook
             return JoinQuery;
         }
 
-        public IDbCommand GetCountCommand()
-        {
-            IDbCommand JoinQuery = DbProvider.GetCommand();
-            JoinQuery.CommandText = "SELECT COUNT(*) FROM (SELECT " + GetCommandPredicate(JoinQuery) + ") as c";
-            lastPosition = 0; //Reset last joined entity position to 0
-            return JoinQuery;
-        }
-
-        // public IDbCommand GetCountCommand<T>(Expression<Func<T,object>> expression)
-        // {
-        //     IDbCommand JoinQuery = DbProvider.GetCommand();
-        //     JoinQuery.CommandText = "SELECT COUNT(DISTINCT " + QueryTranslator.Translate(Evaluator.PartialEval(expression), i).Sql.Replace(".", "") + ") FROM (SELECT " + GetCommandPredicate(JoinQuery) + ") as c";
-        //     lastPosition = 0; //Reset last joined entity position to 0
-        //     return JoinQuery;
-        // }
-
         private string GetCommandPredicate(IDbCommand command = null)
         {
             List<string> FieldStrings = new List<string>();
@@ -173,7 +133,7 @@ namespace Dook
             foreach (string p in Parameters)
             {
                 IEntity entity = (IEntity)Activator.CreateInstance(TypeDictionary[p]);
-                foreach (string propertyName in TableMappingDictionary[p].Values)
+                foreach (string propertyName in TableMappingDictionary[p].Values.Select(x => x.ColumnName))
                 {
                     FieldStrings.Add(p + "." + propertyName + " AS " + p + propertyName);
                 }
